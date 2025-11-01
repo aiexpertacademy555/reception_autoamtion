@@ -1,0 +1,134 @@
+// --- Pin Definitions ---
+const int TRIG_PIN = 12; // Arduino pin connected to Ultrasonic's TRIG pin
+const int ECHO_PIN = 11; // Arduino pin connected to Ultrasonic's ECHO pin
+const int RELAY_PIN = 7; // Arduino pin connected to Relay's IN pin
+
+// --- Settings ---
+// This is the distance (in centimeters) that will trigger the relay.
+// 400 cm is the typical maximum range for an HC-SR04 sensor.
+const int THRESHOLD_DISTANCE = 250;
+
+// --- Global Variables ---
+long duration; // Stores the pulse time from the sensor
+int distance;  // Stores the calculated distance
+
+// This is the timeout for the sensor in microseconds.
+// 38000 us (38ms) is a safe value for the max range (4-5 meters).
+// This prevents pulseIn() from blocking for a full second if no echo is received.
+const long SENSOR_TIMEOUT = 38000;
+
+// --- Timer Settings ---
+// How long the relay stays on after the *last* detection (in milliseconds)
+// 900000 ms = 15 minutes (15 * 60 * 1000)
+const long RELAY_ON_DURATION = 900000; 
+
+// Stores the time (in milliseconds) when an object was last detected
+// We MUST use "unsigned long" for millis() timing, as it can run for ~50 days
+// before overflowing (rolling back to 0).
+unsigned long lastDetectionTime = 0;
+
+// Stores the current state of the relay (so we only print on change)
+bool isRelayOn = false; 
+
+void setup() {
+  // Initialize Serial Monitor for debugging
+  Serial.begin(9600);
+  Serial.println("Ultrasonic Relay Timer started.");
+  Serial.print("Relay will stay on for ");
+  Serial.print(RELAY_ON_DURATION / 1000);
+  Serial.println(" seconds (15 min) after last detection.");
+
+  // Set pin modes
+  pinMode(TRIG_PIN, OUTPUT); 
+  pinMode(ECHO_PIN, INPUT);  
+  pinMode(RELAY_PIN, OUTPUT); 
+
+  // Initialize Relay to OFF state
+  // (Assuming Active LOW relay)
+  digitalWrite(RELAY_PIN, HIGH); 
+  isRelayOn = false;
+}
+
+void loop() {
+  // --- 1. Measure Distance ---
+  // To get a clean reading, we pulse the TRIG pin.
+  // Set TRIG LOW for 2 microseconds
+  digitalWrite(TRIG_PIN, LOW);
+  delayMicroseconds(2);
+  
+  // Set TRIG HIGH for 10 microseconds to send the ultrasonic burst
+  digitalWrite(TRIG_PIN, HIGH);
+  delayMicroseconds(10);
+  
+  // Set TRIG LOW again
+  digitalWrite(TRIG_PIN, LOW);
+
+  // Read the ECHO pin. This line waits for the pin to go HIGH (from the
+  // returning echo) and measures the time (in microseconds) it stays HIGH.
+  // We add SENSOR_TIMEOUT so it doesn't wait forever if no echo returns.
+  duration = pulseIn(ECHO_PIN, HIGH, SENSOR_TIMEOUT);
+
+  // --- 2. Calculate Distance ---
+  // The speed of sound is ~343 m/s, or 0.0343 cm/microsecond.
+  // The pulse travels there AND back, so we divide the total time by 2.
+  // Formula: distance = (duration * 0.0343) / 2
+  distance = duration * 0.0343 / 2;
+
+  // --- 3. Print to Serial Monitor ---
+  Serial.print("Distance: ");
+  Serial.print(distance);
+  Serial.print(" cm. ");
+
+  // --- 4. Control The Relay with Timer ---
+  unsigned long currentTime = millis(); // Get the current time
+
+  if (distance < THRESHOLD_DISTANCE && distance > 0) {
+      // --- OBJECT DETECTED ---
+      // (distance > 0 filters out bad readings or timeouts)
+      
+      // 1. Reset the timer
+      // We update the 'lastDetectionTime' to *now*.
+      lastDetectionTime = currentTime;
+
+      // 2. Turn the relay ON (if it's not already)
+      if (!isRelayOn) {
+          Serial.println("Object detected! Relay ON. Starting 15-min timer...");
+          digitalWrite(RELAY_PIN, LOW); // Send LOW to turn ON
+          isRelayOn = true;
+      } else {
+          // If relay is already on, just log that we reset the timer
+          Serial.println("Object re-detected. Resetting 15-min timer...");
+      }
+
+  } else {
+      // --- NO OBJECT DETECTED ---
+
+      // Check if the relay is currently ON and if the timer has expired
+      // We use subtraction (currentTime - lastDetectionTime) because it
+      // correctly handles the millis() overflow after ~50 days.
+      if (isRelayOn && (currentTime - lastDetectionTime > RELAY_ON_DURATION)) {
+          
+          // 1. Timer has expired. Turn the relay OFF.
+          Serial.println("Timer expired. No object detected for 15 min. Relay OFF.");
+          digitalWrite(RELAY_PIN, HIGH); // Send HIGH to turn OFF
+          isRelayOn = false;
+          
+      } else if (isRelayOn) {
+          // Timer is still running, but no object is currently seen
+          long remainingTime = (RELAY_ON_DURATION - (currentTime - lastDetectionTime)) / 1000;
+          Serial.print("No object, timer active. Time remaining: ");
+          Serial.print(remainingTime);
+          Serial.println(" s");
+          
+      } else {
+          // Relay is off and no object is seen. Do nothing.
+          Serial.println("No object. Relay OFF.");
+      }
+  }
+
+  // Wait a short time before the next sensor read.
+  // This delay does NOT affect the timer, it just controls
+  // how often we check the sensor. 250ms is 4 times/second.
+  delay(250);
+}
+
